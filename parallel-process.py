@@ -23,6 +23,33 @@ def convert_normalized_to_pixel_coords(rect, img_height, img_width):
     h = int(rect['height'] * img_height)
     return [x, y, x + w, y + h]
 
+def get_box_center(bbox):
+    return ((bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2)
+
+def filter_duplicates(detections, distance_threshold=50):
+    filtered = []
+    used = set()
+    
+    for i, det1 in enumerate(detections):
+        if i in used:
+            continue
+            
+        filtered.append(det1)
+        center1 = get_box_center(det1['bbox'])
+        
+        for j, det2 in enumerate(detections[i+1:], i+1):
+            if j in used:
+                continue
+                
+            if det1['label'] == det2['label']:
+                center2 = get_box_center(det2['bbox'])
+                distance = np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+                
+                if distance < distance_threshold:
+                    used.add(j)
+    
+    return filtered
+
 def get_latest_detection(redis_client, depth_map):
     pubsub = redis_client.pubsub()
     pubsub.subscribe('yolo_detections')
@@ -38,9 +65,11 @@ def get_latest_detection(redis_client, depth_map):
         data = json.loads(message['data'])
         timestamp = data['parameters']['timestamp']
         
+        filtered_labels = {'dining.table', 'keyboard', 'laptop', 'person'}
         processed_detections = []
+        
         for detection in data['object_detection']:
-            if 'rectangle' in detection:
+            if 'rectangle' in detection and detection['label'] not in filtered_labels:
                 bbox = convert_normalized_to_pixel_coords(detection['rectangle'], height, width)
                 roi = depth_map[bbox[1]:bbox[3], bbox[0]:bbox[2]]
                 relative_depth = float(np.mean(roi)) / 255.0 if roi.size > 0 else None
@@ -51,6 +80,9 @@ def get_latest_detection(redis_client, depth_map):
                     "bbox": bbox,
                     "relative_depth": relative_depth
                 })
+        
+        # Filter duplicates
+        processed_detections = filter_duplicates(processed_detections)
         
         return {
             "timestamp": timestamp,
